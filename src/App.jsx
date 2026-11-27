@@ -131,32 +131,49 @@ export default function App() {
   };
 
   const getAvailableModels = async (cleanKey) => {
+    const fallbackList = ['gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`
       );
-      if (!res.ok) return ['gemini-3.8-flash'];
+      if (!res.ok) return fallbackList;
       const data = await res.json();
+
+      const excludedKeywords = [
+        'embedding',
+        'imagen',
+        'veo',
+        'tts',
+        'audio',
+        'image',
+        'robotics',
+        'computer-use',
+        'aqa',
+        'bisect',
+        'learnlm'
+      ];
+
       const valid = (data.models || [])
-        .filter(
-          (m) =>
+        .filter((m) => {
+          const lower = m.name.toLowerCase();
+          return (
             m.supportedGenerationMethods?.includes('generateContent') &&
-            m.name.includes('gemini') &&
-            !m.name.includes('embedding') &&
-            !m.name.includes('imagen') &&
-            !m.name.includes('veo')
-        )
+            lower.includes('gemini') &&
+            !excludedKeywords.some((kw) => lower.includes(kw))
+          );
+        })
         .map((m) => m.name.replace('models/', ''));
 
       const prioritized = [
-        ...valid.filter((n) => n.includes('flash') && !n.includes('8b') && !n.includes('thinking')),
-        ...valid.filter((n) => n.includes('lite') || n.includes('8b')),
-        ...valid.filter((n) => n.includes('pro') && !n.includes('vision')),
+        ...valid.filter((n) => n.includes('flash') && !n.includes('thinking')),
+        ...valid.filter((n) => n.includes('pro')),
         ...valid
       ];
-      return [...new Set(prioritized)];
+
+      const unique = [...new Set(prioritized)];
+      return unique.length > 0 ? unique : fallbackList;
     } catch {
-      return ['gemini-3.8-flash'];
+      return fallbackList;
     }
   };
 
@@ -201,23 +218,18 @@ Return ONLY valid JSON:
 
       for (const modelName of candidateModels) {
         setExtractStatus(`${modelName} で単語を抽出中...`);
-        const isThinkingCapable =
-          modelName.includes('2.5') || modelName.includes('3.');
-
-        const bodyPayload = {
-          contents: [{ parts }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            ...(isThinkingCapable ? { thinkingConfig: { thinkingBudget: 0 } } : {})
-          }
-        };
 
         response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyPayload)
+            body: JSON.stringify({
+              contents: [{ parts }],
+              generationConfig: {
+                responseMimeType: 'application/json'
+              }
+            })
           }
         );
 
@@ -226,44 +238,17 @@ Return ONLY valid JSON:
         const errData = await response.json().catch(() => ({}));
         lastErrorMsg = errData.error?.message || `API Error (${response.status})`;
 
-        if (
-          response.status === 400 &&
-          lastErrorMsg.toLowerCase().includes('thinking')
-        ) {
-          const retryNoThinking = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts }],
-                generationConfig: { responseMimeType: 'application/json' }
-              })
-            }
-          );
-          if (retryNoThinking.ok) {
-            response = retryNoThinking;
-            break;
-          }
+        if (response.status === 401 || response.status === 403 || lastErrorMsg.toLowerCase().includes('api key')) {
+          throw new Error(lastErrorMsg);
         }
 
-        if (
-          response.status === 503 ||
-          response.status === 429 ||
-          response.status === 404 ||
-          lastErrorMsg.includes('high demand') ||
-          lastErrorMsg.includes('no longer available') ||
-          lastErrorMsg.includes('quota')
-        ) {
-          continue;
-        }
-
-        throw new Error(lastErrorMsg);
+        // 混雑(503)、制限(429)、非対応(400/404)の場合は止まらず次のモデルへ進む
+        continue;
       }
 
       if (!response || !response.ok) {
         throw new Error(
-          lastErrorMsg || '全モデルが混雑しています。10秒ほど待ってから再試行してください。'
+          lastErrorMsg || '現在AIサーバーが混雑しています。10秒ほど待ってからもう一度お試しください。'
         );
       }
 
