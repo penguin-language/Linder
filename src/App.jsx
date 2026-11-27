@@ -18,7 +18,8 @@ import {
   Key,
   CheckCircle2,
   AlertCircle,
-  Flame
+  Flame,
+  Quote
 } from 'lucide-react';
 
 const SAMPLE_ARTICLE = `EM i friidrott slutade i söndags. Sverige vann flera medaljer de sista dagarna.
@@ -107,7 +108,7 @@ export default function App() {
   };
 
   const speakWord = (text, langCode = 'sv-SE') => {
-    if (!('speechSynthesis' in window)) return;
+    if (!('speechSynthesis' in window) || !text) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = langCode;
@@ -194,10 +195,15 @@ export default function App() {
     setExtractStatus('利用可能なAIモデルを確認中...');
 
     try {
-      const prompt = `Detect article language ("languageName" in Japanese, "languageCode" BCP-47).
-Extract unique non-proper-noun words in lowercase dictionary base form ("lemma"), surface form ("surface"), short Japanese POS ("pos"), and 1 concise Japanese meaning ("meaning").
-Return ONLY valid JSON:
-{"languageName":"string","languageCode":"string","words":[{"lemma":"string","surface":"string","pos":"string","meaning":"string"}]}`;
+      const prompt = `Detect the language of the provided article ("languageName" in Japanese, "languageCode" BCP-47).
+Extract unique non-proper-noun vocabulary words in their lowercase dictionary base form ("lemma").
+For each word provide:
+- "lemma": lowercase dictionary base form
+- "surface": exact form appearing in the article
+- "pos": short part of speech in Japanese
+- "meaningEn": concise English translation (1-3 meanings)
+- "meaningJa": concise Japanese translation (1-3 meanings)
+- "exampleSentence": the exact sentence from the article where this word appears`;
 
       const parts = [{ text: prompt }];
       if (articleText.trim()) {
@@ -217,7 +223,7 @@ Return ONLY valid JSON:
       let lastErrorMsg = '';
 
       for (const modelName of candidateModels) {
-        setExtractStatus(`${modelName} で単語を抽出中...`);
+        setExtractStatus(`${modelName} で単語・例文を抽出中...`);
 
         response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`,
@@ -241,9 +247,18 @@ Return ONLY valid JSON:
                           lemma: { type: 'STRING' },
                           surface: { type: 'STRING' },
                           pos: { type: 'STRING' },
-                          meaning: { type: 'STRING' }
+                          meaningEn: { type: 'STRING' },
+                          meaningJa: { type: 'STRING' },
+                          exampleSentence: { type: 'STRING' }
                         },
-                        required: ['lemma', 'surface', 'pos', 'meaning']
+                        required: [
+                          'lemma',
+                          'surface',
+                          'pos',
+                          'meaningEn',
+                          'meaningJa',
+                          'exampleSentence'
+                        ]
                       }
                     }
                   },
@@ -259,11 +274,14 @@ Return ONLY valid JSON:
         const errData = await response.json().catch(() => ({}));
         lastErrorMsg = errData.error?.message || `API Error (${response.status})`;
 
-        if (response.status === 401 || response.status === 403 || lastErrorMsg.toLowerCase().includes('api key')) {
+        if (
+          response.status === 401 ||
+          response.status === 403 ||
+          lastErrorMsg.toLowerCase().includes('api key')
+        ) {
           throw new Error(lastErrorMsg);
         }
 
-        // 混雑(503)、制限(429)、非対応(400/404)の場合は止まらず次のモデルへ進む
         continue;
       }
 
@@ -467,15 +485,17 @@ Return ONLY valid JSON:
       const updatedWords = { ...langObj.words };
 
       items.forEach((line) => {
-        const [rawWord, rawMeaning] = line.split(/[:：\t-]+/).map((s) => s.trim());
-        const key = rawWord.toLowerCase();
+        const parts = line.split(/[:：\t-]+/).map((s) => s.trim());
+        const rawWord = parts[0];
+        const key = rawWord?.toLowerCase();
         if (!key) return;
         updatedWords[key] = {
           lemma: key,
           surface: rawWord,
           pos: '単語',
-          meaning: rawMeaning || '（一括登録）',
-          context: '',
+          meaningEn: parts[1] || '',
+          meaningJa: parts[2] || parts[1] || '（一括登録）',
+          exampleSentence: '',
           status: bulkStatus,
           streak: bulkStatus === 'known' ? 3 : 0,
           nextReview: Date.now(),
@@ -563,6 +583,15 @@ Return ONLY valid JSON:
       }
     };
     reader.readAsText(file);
+  };
+
+  const renderMeaning = (w) => {
+    const en = w.meaningEn || '';
+    const ja = w.meaningJa || w.meaning || '';
+    if (en && ja && en !== ja) {
+      return { en, ja };
+    }
+    return { en: '', ja: ja || en };
   };
 
   const languages = Object.values(vocabStore);
@@ -745,7 +774,7 @@ Return ONLY valid JSON:
               <p>1. 記事を貼り付け（または撮影）してAI抽出を実行</p>
               <p>2. すでに「知ってる」「学習中」の単語は自動で除外</p>
               <p>3. 初見の単語だけを左右スワイプで高速仕分け</p>
-              <p>4. 「知らない」に入れた単語は3回連続正解で既知語へ卒業</p>
+              <p>4. 「知らない」に入れた単語は英語＋日本語訳＆記事例文つきで復習</p>
             </div>
           </div>
         )}
@@ -799,7 +828,7 @@ Return ONLY valid JSON:
                     </button>
                   </div>
 
-                  <div className="text-center my-8">
+                  <div className="text-center my-6">
                     <h3 className="text-4xl font-black text-slate-900 tracking-tight">
                       {triageQueue[0].lemma}
                     </h3>
@@ -810,6 +839,13 @@ Return ONLY valid JSON:
                         </p>
                       )}
                   </div>
+
+                  {triageQueue[0].exampleSentence && (
+                    <div className="bg-slate-50 rounded-2xl p-3 border border-slate-100 text-xs text-slate-600 leading-relaxed flex items-start gap-2">
+                      <Quote className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span>{triageQueue[0].exampleSentence}</span>
+                    </div>
+                  )}
 
                   <p className="text-[11px] text-center text-slate-400 mt-5">
                     ← 左スワイプで「知らない」 / 右スワイプで「知ってる」 →
@@ -897,7 +933,7 @@ Return ONLY valid JSON:
               <div className="space-y-4">
                 <div
                   onClick={() => setIsFlipped(!isFlipped)}
-                  className="bg-white rounded-3xl p-6 border-2 border-slate-200 shadow-md min-h-[300px] flex flex-col justify-between cursor-pointer select-none transition hover:border-rose-300"
+                  className="bg-white rounded-3xl p-6 border-2 border-slate-200 shadow-md min-h-[340px] flex flex-col justify-between cursor-pointer select-none transition hover:border-rose-300"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
@@ -927,29 +963,71 @@ Return ONLY valid JSON:
                         speakWord(studyQueue[0].lemma, selectedLang);
                       }}
                       className="p-2 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700"
+                      title="単語を発音"
                     >
                       <Volume2 className="w-4 h-4" />
                     </button>
                   </div>
 
-                  <div className="text-center my-8">
+                  <div className="text-center my-6">
                     <span className="text-xs font-semibold text-slate-400">
                       {studyQueue[0].pos}
                     </span>
                     <h3 className="text-4xl font-black text-slate-900 mt-1">
                       {studyQueue[0].lemma}
                     </h3>
+                    {studyQueue[0].surface &&
+                      studyQueue[0].surface.toLowerCase() !== studyQueue[0].lemma && (
+                        <p className="text-xs text-slate-400 mt-1">
+                          記事内の形: {studyQueue[0].surface}
+                        </p>
+                      )}
                   </div>
 
                   {isFlipped ? (
-                    <div className="pt-4 border-t border-slate-100 text-center">
-                      <p className="text-xl font-extrabold text-rose-600">
-                        {studyQueue[0].meaning}
-                      </p>
+                    <div className="pt-4 border-t border-slate-100 space-y-3">
+                      <div className="text-center space-y-1">
+                        {renderMeaning(studyQueue[0]).en && (
+                          <p className="text-sm font-bold text-slate-700">
+                            {renderMeaning(studyQueue[0]).en}
+                          </p>
+                        )}
+                        <p className="text-xl font-extrabold text-rose-600">
+                          {renderMeaning(studyQueue[0]).ja}
+                        </p>
+                      </div>
+
+                      {(studyQueue[0].exampleSentence || studyQueue[0].context) && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="bg-slate-50 rounded-2xl p-3 border border-slate-200/80 flex items-start justify-between gap-2"
+                        >
+                          <div className="space-y-1">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                              記事内の例文
+                            </p>
+                            <p className="text-xs text-slate-700 leading-relaxed">
+                              {studyQueue[0].exampleSentence || studyQueue[0].context}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() =>
+                              speakWord(
+                                studyQueue[0].exampleSentence || studyQueue[0].context,
+                                selectedLang
+                              )
+                            }
+                            className="p-1.5 rounded-full bg-white border border-slate-200 text-slate-600 hover:text-rose-600 shrink-0 mt-1"
+                            title="例文を読み上げ"
+                          >
+                            <Volume2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <p className="text-center text-xs text-slate-400">
-                      タップして意味を表示
+                      タップして英語＋日本語訳と記事内の例文を表示
                     </p>
                   )}
                 </div>
@@ -1084,7 +1162,7 @@ Return ONLY valid JSON:
                   rows={4}
                   value={bulkText}
                   onChange={(e) => setBulkText(e.target.value)}
-                  placeholder={`1行に1語ずつ入力（意味をつける場合は : で区切る）\n例:\noch : そして\natt : 〜すること\nspringa : 走る`}
+                  placeholder={`1行に1語ずつ入力（英語訳 : 日本語訳 の順も可）\n例:\noch : and : そして\natt : to : 〜すること\nspringa : run : 走る`}
                   className="w-full text-xs border border-slate-200 rounded-xl p-2.5"
                 />
                 <div className="flex justify-end gap-2">
@@ -1107,47 +1185,59 @@ Return ONLY valid JSON:
             <div className="space-y-2">
               {currentWordsList
                 .filter((w) => w.status === libraryFilter)
-                .map((w) => (
-                  <div
-                    key={w.lemma}
-                    className="bg-white p-3.5 rounded-2xl border border-slate-200 flex items-center justify-between"
-                  >
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-base text-slate-900">
-                          {w.lemma}
-                        </span>
-                        {w.status === 'learning' && (
-                          <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-                            {w.streak || 0}/3
+                .map((w) => {
+                  const { en, ja } = renderMeaning(w);
+                  const example = w.exampleSentence || w.context;
+                  return (
+                    <div
+                      key={w.lemma}
+                      className="bg-white p-3.5 rounded-2xl border border-slate-200 flex items-start justify-between gap-2"
+                    >
+                      <div className="space-y-1 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-base text-slate-900">
+                            {w.lemma}
                           </span>
+                          {w.status === 'learning' && (
+                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                              {w.streak || 0}/3
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-600">
+                          {en && <span className="font-semibold text-slate-800">{en} / </span>}
+                          <span>{ja}</span>
+                        </p>
+                        {example && (
+                          <p className="text-[11px] text-slate-400 italic leading-snug pt-0.5">
+                            "{example}"
+                          </p>
                         )}
                       </div>
-                      <p className="text-xs text-slate-500">{w.meaning}</p>
-                    </div>
 
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => speakWord(w.lemma, selectedLang)}
-                        className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                      >
-                        <Volume2 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => toggleWordStatus(selectedLang, w.lemma)}
-                        className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] font-bold text-slate-700"
-                      >
-                        {w.status === 'learning' ? '既知へ' : '学習へ'}
-                      </button>
-                      <button
-                        onClick={() => deleteWord(selectedLang, w.lemma)}
-                        className="p-2 rounded-lg text-slate-400 hover:text-rose-600"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => speakWord(w.lemma, selectedLang)}
+                          className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                        >
+                          <Volume2 className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => toggleWordStatus(selectedLang, w.lemma)}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[11px] font-bold text-slate-700"
+                        >
+                          {w.status === 'learning' ? '既知へ' : '学習へ'}
+                        </button>
+                        <button
+                          onClick={() => deleteWord(selectedLang, w.lemma)}
+                          className="p-2 rounded-lg text-slate-400 hover:text-rose-600"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
             </div>
           </div>
         )}
