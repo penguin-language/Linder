@@ -25,7 +25,7 @@ const SAMPLE_ARTICLE = `EM i friidrott slutade i söndags. Sverige vann flera me
 I lördags vann Andreas Almgren guld på 10 tusen meter. Han sprang ifrån alla och kom i mål nästan 20 sekunder före tvåan. Almgrens tid är nytt rekord för EM.
 – Det kan inte bli bättre, säger Almgren.
 Stavhopparen Armand Duplantis vann också guld. Han hoppade 6 meter och 15 centimeter. Det är nytt rekord för EM.
-Men det var en svår tävling för Duplantis. Efteråt berättade han att han var magsjuk. Det hände efter att han ätit indisk mat till lunch.
+Men det var en svår tävlingsdag för Duplantis. Efteråt berättade han att han var magsjuk. Det hände efter att han ätit indisk mat till lunch.
 – Jag har varit på toaletten hela dagen, sa Duplantis.`;
 
 const STORAGE_KEY = 'linder_vocab_data_v1';
@@ -43,6 +43,7 @@ export default function App() {
   const [imageBase64, setImageBase64] = useState(null);
   const [imageMimeType, setImageMimeType] = useState(null);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [extractStatus, setExtractStatus] = useState('');
   const [extractError, setExtractError] = useState('');
 
   // Triage (Swipe) state
@@ -129,8 +130,39 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  const getAvailableModels = async (cleanKey) => {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`
+      );
+      if (!res.ok) return ['gemini-3.8-flash'];
+      const data = await res.json();
+      const valid = (data.models || [])
+        .filter(
+          (m) =>
+            m.supportedGenerationMethods?.includes('generateContent') &&
+            m.name.includes('gemini') &&
+            !m.name.includes('embedding') &&
+            !m.name.includes('imagen') &&
+            !m.name.includes('veo')
+        )
+        .map((m) => m.name.replace('models/', ''));
+
+      const prioritized = [
+        ...valid.filter((n) => n.includes('flash') && !n.includes('8b') && !n.includes('thinking')),
+        ...valid.filter((n) => n.includes('lite') || n.includes('8b')),
+        ...valid.filter((n) => n.includes('pro') && !n.includes('vision')),
+        ...valid
+      ];
+      return [...new Set(prioritized)];
+    } catch {
+      return ['gemini-3.8-flash'];
+    }
+  };
+
   const handleExtractWords = async () => {
-    if (!apiKey.trim()) {
+    const cleanKey = apiKey.trim();
+    if (!cleanKey) {
       setShowSettings(true);
       setExtractError('先に右上の歯車アイコンから Gemini APIキー を設定してください。');
       return;
@@ -142,11 +174,12 @@ export default function App() {
 
     setIsExtracting(true);
     setExtractError('');
+    setExtractStatus('利用可能なAIモデルを確認中...');
 
     try {
       const prompt = `Detect article language ("languageName" in Japanese, "languageCode" BCP-47).
 Extract unique non-proper-noun words in lowercase dictionary base form ("lemma"), surface form ("surface"), short Japanese POS ("pos"), and 1 concise Japanese meaning ("meaning").
-Return ONLY compact JSON:
+Return ONLY valid JSON:
 {"languageName":"string","languageCode":"string","words":[{"lemma":"string","surface":"string","pos":"string","meaning":"string"}]}`;
 
       const parts = [{ text: prompt }];
@@ -162,22 +195,29 @@ Return ONLY compact JSON:
         });
       }
 
+      const candidateModels = await getAvailableModels(cleanKey);
       let response = null;
       let lastErrorMsg = '';
 
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (const modelName of candidateModels) {
+        setExtractStatus(`${modelName} で単語を抽出中...`);
+        const isThinkingCapable =
+          modelName.includes('2.5') || modelName.includes('3.');
+
+        const bodyPayload = {
+          contents: [{ parts }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            ...(isThinkingCapable ? { thinkingConfig: { thinkingBudget: 0 } } : {})
+          }
+        };
+
         response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts }],
-              generationConfig: {
-                responseMimeType: 'application/json',
-                thinkingConfig: { thinkingBudget: 0 }
-              }
-            })
+            body: JSON.stringify(bodyPayload)
           }
         );
 
@@ -185,22 +225,54 @@ Return ONLY compact JSON:
 
         const errData = await response.json().catch(() => ({}));
         lastErrorMsg = errData.error?.message || `API Error (${response.status})`;
-        if (response.status === 503 || lastErrorMsg.includes('high demand')) {
-          await new Promise((r) => setTimeout(r, 1200));
+
+        if (
+          response.status === 400 &&
+          lastErrorMsg.toLowerCase().includes('thinking')
+        ) {
+          const retryNoThinking = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts }],
+                generationConfig: { responseMimeType: 'application/json' }
+              })
+            }
+          );
+          if (retryNoThinking.ok) {
+            response = retryNoThinking;
+            break;
+          }
+        }
+
+        if (
+          response.status === 503 ||
+          response.status === 429 ||
+          response.status === 404 ||
+          lastErrorMsg.includes('high demand') ||
+          lastErrorMsg.includes('no longer available') ||
+          lastErrorMsg.includes('quota')
+        ) {
           continue;
         }
+
         throw new Error(lastErrorMsg);
       }
 
       if (!response || !response.ok) {
-        throw new Error(lastErrorMsg || 'サーバーが混雑しています。数秒後に再試行してください。');
+        throw new Error(
+          lastErrorMsg || '全モデルが混雑しています。10秒ほど待ってから再試行してください。'
+        );
       }
 
       const data = await response.json();
       const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!rawText) throw new Error('AIから有効な応答が得られませんでした。');
 
-      const parsed = JSON.parse(rawText);
+      const cleanedJson = rawText.replace(/^```json\s*|\s*```$/g, '').trim();
+      const parsed = JSON.parse(cleanedJson);
       const langCode = parsed.languageCode || 'sv-SE';
       const langName = parsed.languageName || '検出された言語';
 
@@ -230,6 +302,7 @@ Return ONLY compact JSON:
       setExtractError(`抽出エラー: ${err.message}`);
     } finally {
       setIsExtracting(false);
+      setExtractStatus('');
     }
   };
 
@@ -656,7 +729,7 @@ Return ONLY compact JSON:
               >
                 <Sparkles className="w-4 h-4" />
                 {isExtracting
-                  ? 'AIが言語判定・未知語を抽出中...'
+                  ? extractStatus || 'AIが言語判定・未知語を抽出中...'
                   : 'AIで未判定の単語を抽出する'}
               </button>
             </div>
