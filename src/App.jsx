@@ -3,7 +3,6 @@ import {
   BookOpen,
   Camera,
   Check,
-  X,
   Volume2,
   RotateCcw,
   Layers,
@@ -55,13 +54,13 @@ export default function App() {
 
   // Study (Flashcards) state
   const [selectedLang, setSelectedLang] = useState('');
-  const [studyMode, setStudyMode] = useState('due'); // 'due' | 'all'
+  const [studyMode, setStudyMode] = useState('due');
   const [studyQueue, setStudyQueue] = useState([]);
   const [isFlipped, setIsFlipped] = useState(false);
   const [sessionStats, setSessionStats] = useState({ reviewed: 0, graduated: 0 });
 
   // Library state
-  const [libraryFilter, setLibraryFilter] = useState('learning'); // 'learning' | 'known'
+  const [libraryFilter, setLibraryFilter] = useState('learning');
   const [bulkText, setBulkText] = useState('');
   const [bulkStatus, setBulkStatus] = useState('known');
   const [showBulkModal, setShowBulkModal] = useState(false);
@@ -69,7 +68,6 @@ export default function App() {
   const fileInputRef = useRef(null);
   const backupInputRef = useRef(null);
 
-  // Load saved data
   useEffect(() => {
     try {
       const savedVocab = localStorage.getItem(STORAGE_KEY);
@@ -90,7 +88,6 @@ export default function App() {
     }
   }, []);
 
-  // Save vocab changes
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(vocabStore));
@@ -108,7 +105,6 @@ export default function App() {
     localStorage.setItem(API_KEY_STORAGE, val.trim());
   };
 
-  // Speech synthesis
   const speakWord = (text, langCode = 'sv-SE') => {
     if (!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
@@ -118,7 +114,6 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   };
 
-  // Handle Image Upload
   const handleImageChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -134,7 +129,6 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  // Extract words via Gemini API
   const handleExtractWords = async () => {
     if (!apiKey.trim()) {
       setShowSettings(true);
@@ -150,35 +144,14 @@ export default function App() {
     setExtractError('');
 
     try {
-      const prompt = `Analyze the provided article text or image.
-1. Detect the primary language of the article (provide both Japanese display name like "スウェーデン語" and BCP-47 locale code like "sv-SE").
-2. Extract all unique content and functional words, EXCLUDING proper nouns (names of people, cities, countries, competitions like EM) and pure numbers.
-3. Convert each word to its dictionary base form (lemma). Deduplicate words with the same lemma.
-4. For each unique lemma, provide:
-   - "lemma": base form in lowercase
-   - "surface": how it appeared in the text
-   - "pos": part of speech in Japanese (動詞, 名詞, 形容詞, 副詞, 前置詞, etc.)
-   - "meaning": concise Japanese meaning (1-3 core meanings)
-   - "context": the exact short sentence from the article containing this word
-
-Return ONLY valid JSON matching this schema:
-{
-  "languageName": "string",
-  "languageCode": "string",
-  "words": [
-    {
-      "lemma": "string",
-      "surface": "string",
-      "pos": "string",
-      "meaning": "string",
-      "context": "string"
-    }
-  ]
-}`;
+      const prompt = `Detect article language ("languageName" in Japanese, "languageCode" BCP-47).
+Extract unique non-proper-noun words in lowercase dictionary base form ("lemma"), surface form ("surface"), short Japanese POS ("pos"), and 1 concise Japanese meaning ("meaning").
+Return ONLY compact JSON:
+{"languageName":"string","languageCode":"string","words":[{"lemma":"string","surface":"string","pos":"string","meaning":"string"}]}`;
 
       const parts = [{ text: prompt }];
       if (articleText.trim()) {
-        parts.push({ text: `Article text:\n${articleText}` });
+        parts.push({ text: articleText });
       }
       if (imageBase64) {
         parts.push({
@@ -189,23 +162,37 @@ Return ONLY valid JSON matching this schema:
         });
       }
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: {
-              responseMimeType: 'application/json'
-            }
-          })
-        }
-      );
+      const models = ['gemini-3.8-flash-lite', 'gemini-3.8-flash'];
+      let response = null;
+      let lastErrorMsg = '';
 
-      if (!response.ok) {
+      for (const modelName of models) {
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey.trim()}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts }],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                thinkingConfig: { thinkingBudget: 0 }
+              }
+            })
+          }
+        );
+
+        if (response.ok) break;
+
         const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error?.message || `API Error (${response.status})`);
+        lastErrorMsg = errData.error?.message || `API Error (${response.status})`;
+        if (response.status !== 503 && !lastErrorMsg.includes('high demand')) {
+          throw new Error(lastErrorMsg);
+        }
+      }
+
+      if (!response || !response.ok) {
+        throw new Error(lastErrorMsg || 'サーバーが混雑しています。数秒後に再試行してください。');
       }
 
       const data = await response.json();
@@ -222,7 +209,6 @@ Return ONLY valid JSON matching this schema:
         words: {}
       };
 
-      // Filter out words already in 'known' or 'learning'
       const newWords = (parsed.words || []).filter((w) => {
         const key = w.lemma.toLowerCase().trim();
         return !existingLangData.words[key];
@@ -246,7 +232,6 @@ Return ONLY valid JSON matching this schema:
     }
   };
 
-  // Triage decision: 'known' (right) or 'learning' (left)
   const handleTriageDecision = (decision) => {
     if (triageQueue.length === 0 || !triageLang) return;
     const current = triageQueue[0];
@@ -267,7 +252,7 @@ Return ONLY valid JSON matching this schema:
             [key]: {
               ...current,
               lemma: key,
-              status: decision, // 'known' | 'learning'
+              status: decision,
               streak: decision === 'known' ? 3 : 0,
               nextReview: Date.now(),
               addedAt: Date.now()
@@ -281,7 +266,6 @@ Return ONLY valid JSON matching this schema:
     setTriageQueue((prev) => prev.slice(1));
   };
 
-  // Swipe gestures
   const onPointerDown = (e) => {
     setIsDragging(true);
     dragStartX.current = e.clientX;
@@ -304,7 +288,6 @@ Return ONLY valid JSON matching this schema:
     }
   };
 
-  // Build study queue whenever selectedLang or studyMode changes
   useEffect(() => {
     if (!selectedLang || !vocabStore[selectedLang]) {
       setStudyQueue([]);
@@ -322,7 +305,6 @@ Return ONLY valid JSON matching this schema:
     setIsFlipped(false);
   }, [selectedLang, studyMode, activeTab]);
 
-  // Flashcard answer handler (3-streak graduation)
   const handleFlashcardAnswer = (knewIt) => {
     if (studyQueue.length === 0 || !selectedLang) return;
     const current = studyQueue[0];
@@ -358,7 +340,6 @@ Return ONLY valid JSON matching this schema:
       }));
       setStudyQueue((prev) => prev.slice(1));
     } else {
-      // Reset streak to 0 and re-queue in current session
       setVocabStore((prev) => {
         const langObj = prev[selectedLang];
         return {
@@ -387,7 +368,6 @@ Return ONLY valid JSON matching this schema:
     setIsFlipped(false);
   };
 
-  // Bulk import words
   const handleBulkImport = () => {
     if (!bulkText.trim()) return;
     const targetLang = selectedLang || 'sv-SE';
@@ -437,7 +417,6 @@ Return ONLY valid JSON matching this schema:
     setShowBulkModal(false);
   };
 
-  // Toggle status manually in library
   const toggleWordStatus = (langCode, lemma) => {
     setVocabStore((prev) => {
       const langObj = prev[langCode];
@@ -476,7 +455,6 @@ Return ONLY valid JSON matching this schema:
     });
   };
 
-  // Export / Import JSON backup
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify(vocabStore, null, 2)], {
       type: 'application/json'
@@ -517,7 +495,6 @@ Return ONLY valid JSON matching this schema:
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col max-w-xl mx-auto shadow-sm border-x border-slate-200">
-      {/* Header */}
       <header className="bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between sticky top-0 z-20">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-rose-500 to-amber-500 flex items-center justify-center text-white font-black text-lg shadow-sm">
@@ -561,7 +538,6 @@ Return ONLY valid JSON matching this schema:
         </div>
       </header>
 
-      {/* API Key Settings Drawer */}
       {showSettings && (
         <div className="bg-slate-900 text-white p-4 border-b border-slate-800">
           <div className="flex items-center justify-between mb-2">
@@ -597,9 +573,7 @@ Return ONLY valid JSON matching this schema:
         </div>
       )}
 
-      {/* Main Content */}
       <main className="flex-1 p-4 pb-24 overflow-y-auto">
-        {/* TAB 1: IMPORT */}
         {activeTab === 'import' && (
           <div className="space-y-4">
             <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-3">
@@ -628,7 +602,6 @@ Return ONLY valid JSON matching this schema:
                 className="w-full rounded-xl border border-slate-200 p-3 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500/30 focus:border-rose-500 leading-relaxed"
               />
 
-              {/* Photo Capture / Upload */}
               <div className="flex items-center gap-2">
                 <input
                   ref={fileInputRef}
@@ -697,7 +670,6 @@ Return ONLY valid JSON matching this schema:
           </div>
         )}
 
-        {/* TAB 2: TRIAGE (SWIPE) */}
         {activeTab === 'triage' && (
           <div className="flex flex-col items-center justify-center min-h-[65vh]">
             {triageQueue.length > 0 ? (
@@ -710,7 +682,6 @@ Return ONLY valid JSON matching this schema:
                   <span>残り {triageQueue.length} 語</span>
                 </div>
 
-                {/* Swipeable Card */}
                 <div
                   onPointerDown={onPointerDown}
                   onPointerMove={onPointerMove}
@@ -722,7 +693,6 @@ Return ONLY valid JSON matching this schema:
                   }}
                   className="bg-white rounded-3xl p-6 border-2 border-slate-200 shadow-lg select-none cursor-grab active:cursor-grabbing relative overflow-hidden"
                 >
-                  {/* Swipe Overlay Badges */}
                   {swipeOffset > 35 && (
                     <div className="absolute top-4 left-4 border-2 border-emerald-500 text-emerald-600 font-black px-3 py-1 rounded-lg text-sm rotate-[-12deg] bg-emerald-50/90">
                       知ってる！
@@ -749,7 +719,7 @@ Return ONLY valid JSON matching this schema:
                     </button>
                   </div>
 
-                  <div className="text-center my-6">
+                  <div className="text-center my-8">
                     <h3 className="text-4xl font-black text-slate-900 tracking-tight">
                       {triageQueue[0].lemma}
                     </h3>
@@ -761,18 +731,11 @@ Return ONLY valid JSON matching this schema:
                       )}
                   </div>
 
-                  {triageQueue[0].context && (
-                    <div className="bg-slate-50 rounded-xl p-3.5 border border-slate-100 text-sm text-slate-700 italic text-center">
-                      "{triageQueue[0].context}"
-                    </div>
-                  )}
-
                   <p className="text-[11px] text-center text-slate-400 mt-5">
                     ← 左スワイプで「知らない」 / 右スワイプで「知ってる」 →
                   </p>
                 </div>
 
-                {/* Action Buttons */}
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     onClick={() => handleTriageDecision('learning')}
@@ -820,10 +783,8 @@ Return ONLY valid JSON matching this schema:
           </div>
         )}
 
-        {/* TAB 3: STUDY (FLASHCARDS WITH 3-STREAK GRADUATION) */}
         {activeTab === 'study' && (
           <div className="space-y-4">
-            {/* Mode Switch & Stats */}
             <div className="flex items-center justify-between bg-white p-2.5 rounded-2xl border border-slate-200">
               <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
                 <button
@@ -856,9 +817,8 @@ Return ONLY valid JSON matching this schema:
               <div className="space-y-4">
                 <div
                   onClick={() => setIsFlipped(!isFlipped)}
-                  className="bg-white rounded-3xl p-6 border-2 border-slate-200 shadow-md min-h-[340px] flex flex-col justify-between cursor-pointer select-none transition hover:border-rose-300"
+                  className="bg-white rounded-3xl p-6 border-2 border-slate-200 shadow-md min-h-[300px] flex flex-col justify-between cursor-pointer select-none transition hover:border-rose-300"
                 >
-                  {/* Top Bar: Streak Dots */}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
                       {[0, 1, 2].map((idx) => (
@@ -892,24 +852,17 @@ Return ONLY valid JSON matching this schema:
                     </button>
                   </div>
 
-                  {/* Card Front */}
-                  <div className="text-center my-6">
+                  <div className="text-center my-8">
                     <span className="text-xs font-semibold text-slate-400">
                       {studyQueue[0].pos}
                     </span>
                     <h3 className="text-4xl font-black text-slate-900 mt-1">
                       {studyQueue[0].lemma}
                     </h3>
-                    {studyQueue[0].context && (
-                      <p className="mt-4 text-sm text-slate-600 italic bg-slate-50 p-3 rounded-xl border border-slate-100">
-                        "{studyQueue[0].context}"
-                      </p>
-                    )}
                   </div>
 
-                  {/* Card Back (Meaning) */}
                   {isFlipped ? (
-                    <div className="pt-4 border-t border-slate-100 text-center animate-fadeIn">
+                    <div className="pt-4 border-t border-slate-100 text-center">
                       <p className="text-xl font-extrabold text-rose-600">
                         {studyQueue[0].meaning}
                       </p>
@@ -921,7 +874,6 @@ Return ONLY valid JSON matching this schema:
                   )}
                 </div>
 
-                {/* Answer Buttons */}
                 {isFlipped ? (
                   <div className="grid grid-cols-2 gap-3">
                     <button
@@ -972,10 +924,8 @@ Return ONLY valid JSON matching this schema:
           </div>
         )}
 
-        {/* TAB 4: LIBRARY */}
         {activeTab === 'library' && (
           <div className="space-y-4">
-            {/* Summary Cards */}
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => setLibraryFilter('learning')}
@@ -1005,7 +955,6 @@ Return ONLY valid JSON matching this schema:
               </button>
             </div>
 
-            {/* Utility Actions */}
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => setShowBulkModal(!showBulkModal)}
@@ -1036,7 +985,6 @@ Return ONLY valid JSON matching this schema:
               />
             </div>
 
-            {/* Bulk Import Box */}
             {showBulkModal && (
               <div className="bg-white p-4 rounded-2xl border border-slate-300 space-y-3 shadow-sm">
                 <div className="flex items-center justify-between">
@@ -1076,7 +1024,6 @@ Return ONLY valid JSON matching this schema:
               </div>
             )}
 
-            {/* Word List */}
             <div className="space-y-2">
               {currentWordsList
                 .filter((w) => w.status === libraryFilter)
@@ -1126,7 +1073,6 @@ Return ONLY valid JSON matching this schema:
         )}
       </main>
 
-      {/* Bottom Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-xl mx-auto bg-white border-t border-slate-200 grid grid-cols-4 py-2 px-1 z-20">
         <button
           onClick={() => setActiveTab('import')}
