@@ -31,12 +31,14 @@ Men det var en svår tävlingsdag för Duplantis. Efteråt berättade han att ha
 
 const STORAGE_KEY = 'linder_vocab_data_v1';
 const API_KEY_STORAGE = 'linder_gemini_api_key';
+const TRIAGE_STORAGE_KEY = 'linder_triage_state_v1';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('import');
   const [vocabStore, setVocabStore] = useState({});
   const [apiKey, setApiKey] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [speechNotice, setSpeechNotice] = useState('');
 
   // Import state
   const [articleText, setArticleText] = useState('');
@@ -69,8 +71,19 @@ export default function App() {
 
   const fileInputRef = useRef(null);
   const backupInputRef = useRef(null);
+  const voicesRef = useRef([]);
 
   useEffect(() => {
+    const loadVoices = () => {
+      if ('speechSynthesis' in window) {
+        voicesRef.current = window.speechSynthesis.getVoices();
+      }
+    };
+    loadVoices();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+
     try {
       const savedVocab = localStorage.getItem(STORAGE_KEY);
       if (savedVocab) {
@@ -78,6 +91,14 @@ export default function App() {
         setVocabStore(parsed);
         const langs = Object.keys(parsed);
         if (langs.length > 0) setSelectedLang(langs[0]);
+      }
+      const savedTriage = localStorage.getItem(TRIAGE_STORAGE_KEY);
+      if (savedTriage) {
+        const parsedTriage = JSON.parse(savedTriage);
+        if (parsedTriage.queue?.length > 0) {
+          setTriageQueue(parsedTriage.queue);
+          setTriageLang(parsedTriage.lang || null);
+        }
       }
       const savedKey = localStorage.getItem(API_KEY_STORAGE);
       if (savedKey) {
@@ -102,16 +123,59 @@ export default function App() {
     }
   }, [vocabStore, selectedLang]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        TRIAGE_STORAGE_KEY,
+        JSON.stringify({ queue: triageQueue, lang: triageLang })
+      );
+    } catch (e) {
+      console.error('Failed to save triage state:', e);
+    }
+  }, [triageQueue, triageLang]);
+
   const handleSaveApiKey = (val) => {
     setApiKey(val);
     localStorage.setItem(API_KEY_STORAGE, val.trim());
   };
 
   const speakWord = (text, langCode = 'sv-SE') => {
-    if (!('speechSynthesis' in window) || !text) return;
+    if (!text) return;
+    if (!('speechSynthesis' in window)) {
+      setSpeechNotice('このブラウザは音声読み上げ機能に対応していません。');
+      setTimeout(() => setSpeechNotice(''), 4000);
+      return;
+    }
+
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = langCode;
+    const normalizedTarget = (langCode || 'en-US').toLowerCase();
+    const baseLang = normalizedTarget.split('-')[0];
+
+    const availableVoices =
+      voicesRef.current.length > 0
+        ? voicesRef.current
+        : window.speechSynthesis.getVoices();
+
+    const matchedVoice =
+      availableVoices.find((v) => v.lang.toLowerCase() === normalizedTarget) ||
+      availableVoices.find((v) => v.lang.toLowerCase().startsWith(`${baseLang}-`)) ||
+      availableVoices.find((v) => v.lang.toLowerCase() === baseLang);
+
+    if (matchedVoice) {
+      utterance.voice = matchedVoice;
+      utterance.lang = matchedVoice.lang;
+      setSpeechNotice('');
+    } else {
+      utterance.lang = langCode;
+      if (availableVoices.length > 0) {
+        setSpeechNotice(
+          `端末に「${langCode}」の音声データがないため標準音声で代用しています（端末の言語設定から音声を追加できます）`
+        );
+        setTimeout(() => setSpeechNotice(''), 5000);
+      }
+    }
+
     utterance.rate = 0.9;
     window.speechSynthesis.speak(utterance);
   };
@@ -195,7 +259,7 @@ export default function App() {
     setExtractStatus('利用可能なAIモデルを確認中...');
 
     try {
-      const prompt = `Detect the language of the provided article ("languageName" in Japanese, "languageCode" BCP-47).
+      const prompt = `Detect the language of the provided article ("languageName" in Japanese, "languageCode" standard BCP-47 locale like "sv-SE", "fi-FI", "en-US", "de-DE", "fr-FR", "es-ES").
 Extract unique non-proper-noun vocabulary words in their lowercase dictionary base form ("lemma").
 For each word provide:
 - "lemma": lowercase dictionary base form
@@ -646,6 +710,18 @@ For each word provide:
           </button>
         </div>
       </header>
+
+      {speechNotice && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-[11px] text-amber-800 flex items-center justify-between">
+          <span>{speechNotice}</span>
+          <button
+            onClick={() => setSpeechNotice('')}
+            className="text-amber-600 font-bold ml-2 shrink-0"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {showSettings && (
         <div className="bg-slate-900 text-white p-4 border-b border-slate-800">
