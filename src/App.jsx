@@ -227,7 +227,28 @@ Return ONLY valid JSON:
             body: JSON.stringify({
               contents: [{ parts }],
               generationConfig: {
-                responseMimeType: 'application/json'
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: 'OBJECT',
+                  properties: {
+                    languageName: { type: 'STRING' },
+                    languageCode: { type: 'STRING' },
+                    words: {
+                      type: 'ARRAY',
+                      items: {
+                        type: 'OBJECT',
+                        properties: {
+                          lemma: { type: 'STRING' },
+                          surface: { type: 'STRING' },
+                          pos: { type: 'STRING' },
+                          meaning: { type: 'STRING' }
+                        },
+                        required: ['lemma', 'surface', 'pos', 'meaning']
+                      }
+                    }
+                  },
+                  required: ['languageName', 'languageCode', 'words']
+                }
               }
             })
           }
