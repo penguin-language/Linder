@@ -162,13 +162,12 @@ Return ONLY compact JSON:
         });
       }
 
-      const models = ['gemini-3.8-flash-lite', 'gemini-3.8-flash'];
       let response = null;
       let lastErrorMsg = '';
 
-      for (const modelName of models) {
+      for (let attempt = 0; attempt < 3; attempt++) {
         response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey.trim()}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey.trim()}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -186,9 +185,11 @@ Return ONLY compact JSON:
 
         const errData = await response.json().catch(() => ({}));
         lastErrorMsg = errData.error?.message || `API Error (${response.status})`;
-        if (response.status !== 503 && !lastErrorMsg.includes('high demand')) {
-          throw new Error(lastErrorMsg);
+        if (response.status === 503 || lastErrorMsg.includes('high demand')) {
+          await new Promise((r) => setTimeout(r, 1200));
+          continue;
         }
+        throw new Error(lastErrorMsg);
       }
 
       if (!response || !response.ok) {
